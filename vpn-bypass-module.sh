@@ -1,61 +1,42 @@
-/bin/bash
+#!/usr/bin/env bash
 
-# ===================================================================
-# PLUGIN VERSION: v2.7.1-Stable (Enterprise IPSet Core Integration)
-# DESCRIPTION: Интеграция высокоскоростных хэш-таблиц IPSet в ip rule
-# ===================================================================
+# ==============================================================================
+# CUSTOM VPN ROUTING SUITE FOR UNIFI OS (v2.8.8-Stable) - BYPASS CORE MODULE
+# ==============================================================================
 
-SET_NAME="bypass_list"
-BYPASS_DIR="/data/vpn-router/bypass-parts"
+set -e
 
-[ "$ENABLE_BYPASS_MODULE" != "true" ] && return 0
+# --- Базовые пути и импорт конфигурации ---
+CONF_FILE="/data/vpn-router/vpn-routing.conf"
 
-case "$1" in
-    start)
-        log_msg "INFO" "$MSG_BYPASS_ON"
-        
-        # 1. Создаем хэш-таблицу в памяти ядра, если она отсутствует
-        if ! ipset list "$SET_NAME" >/dev/null 2>&1; then
-            ipset create "$SET_NAME" hash:net maxelem 65536
-        fi
-        
-        # 2. Потоковая загрузка порционных файлов в IPSet через механизм restore
-        if [ -d "$BYPASS_DIR" ]; then
-            (
-                echo "flush $SET_NAME"
-                for file in "$BYPASS_DIR"/part_*.txt; do
-                    [ ! -f "$file" ] && continue
-                    while IFS= read -r subnet || [ -n "$subnet" ]; do
-                        case "$subnet" in
-                            ""|#*) continue ;;
-                        esac
-                        echo "add $SET_NAME $subnet"
-                    done < "$file"
-                done
-            ) | ipset restore >/dev/null 2>&1
-        fi
-        
-        # 3. Применение ЕДИНСТВЕННОГО правила в ip rule для каждой сети клиента
-        # Используется нативный, проверенный синтаксис: set SET_NAME dst
-        bypass_pref=900
-        for client_net in $INTERNET_FORWARD_NETS; do
-            [ -z "$net" ] && continue
-            ip rule add from "$client_net" set "$SET_NAME" dst pref $bypass_pref table main
-            bypass_pref=$((bypass_pref + 1))
-        done
-        ;;
-        
-    stop|clean)
-        # Чистая очистка диапазона правил 900-999
-        for p in $(seq 900 999); do
-            while ip rule del pref $p 2>/dev/null; do :; done
-        done
-        
-        # Сброс содержимого хэш-таблицы без удаления её структуры
-        if ipset list "$SET_NAME" >/dev/null 2>&1; then
-            ipset flush "$SET_NAME"
-        fi
-        log_msg "INFO" "$MSG_BYPASS_CLEAN"
-        ;;
-esac
+if [ -f "$CONF_FILE" ]; then
+    . "$CONF_FILE"
+else
+    echo "[CRITICAL] Configuration file $CONF_FILE not found in bypass module!"
+    exit 1
+fi
 
+# Константы для маркировки пакетов (FWMARK)
+FWMARK_ID="0x99"
+PREF_BYPASS_RULE=1500
+
+# Логирование
+log_msg() {
+    local level="$1"
+    local message="$2"
+    echo "[$level] $message"
+    logger -t "$LOG_TAG" "[$level] (v2.8.8-CoreModule) $message"
+}
+
+# Проверка окружения (переданы ли параметры из лоадера/конфига)
+if [ -z "$TARGET_PURE_TABLE_ID" ]; then
+    # Быстрый фолбэк-детект, если запущен вне лоадера
+    TARGET_PURE_TABLE_ID="178"
+fi
+
+# Функция генерации валидного имени ipset из пути к файлу
+get_set_name() {
+    local file_path="$1"
+    local base_name
+    base_name=$(basename "$file_path" | tr -cd 'a-zA-Z0-9_-')
+    echo "vpn_${base_name:0:27}" # Ограничение длины имени ipset в ядре (31 символ)
