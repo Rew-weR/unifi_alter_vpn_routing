@@ -1,4 +1,4 @@
-#!/bin/sh
+/bin/bash
 
 # ===================================================================
 # LOADER VERSION: v1.1.0-Stable (Safe Split & Restore)
