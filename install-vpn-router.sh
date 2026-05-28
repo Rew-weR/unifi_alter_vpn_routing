@@ -4,6 +4,8 @@
 # CUSTOM VPN ROUTING SUITE FOR UNIFI OS (v2.8.5-Stable) - INTERACTIVE INSTALLER
 # ==============================================================================
 
+mkdir -p /data/vpn-router /data/vpn-router/languages /data/vpn-router/routes-backup /data/vpn-router/bypass-parts
+
 set -e # Останавливать выполнение при любой критической ошибке
 
 # --- Глобальные пути и параметры ---
