@@ -1,4 +1,4 @@
-#!/bin/sh
+/bin/bash
 
 # ===================================================================
 # PLUGIN VERSION: v2.7.1-Stable (Enterprise IPSet Core Integration)
