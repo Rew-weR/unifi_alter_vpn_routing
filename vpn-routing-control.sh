@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# CUSTOM VPN ROUTING SUITE FOR UNIFI OS (v3.1.0-Stable) - MAIN CONTROLLER
+# CUSTOM VPN ROUTING SUITE FOR UNIFI OS (v3.3.5-Stable) - MAIN CONTROLLER (PART 1)
 # ==============================================================================
-# Главный управляющий скрипт ядра Linux. Реализует инверсное PBR-разделение:
-# Все ресурсы по умолчанию идут в VPN, а списки исключений — в нативный WAN1.
+# Главный управляющий скрипт ядра Linux. Реализует инверсное PBR-разделение,
+# принудительный перехват DNS (DNS Hijacking) и блокировку DNS-over-TLS (DoT).
 # ==============================================================================
 
 set -e
@@ -26,7 +26,6 @@ LANG_FILE="${TOOL_PATH}/languages/${SYSTEM_LANGUAGE}.conf"
 if [ -f "$LANG_FILE" ]; then
     . "$LANG_FILE"
 else
-    # Резервные строки на случай сбоя i18n
     MSG_STARTING="Запуск маршрутизации и применение политик PBR/IPSec..."
     MSG_CLEANING="Очистка кастомных правил ядра..."
     MSG_ERROR="[ERROR] Критическая ошибка ядра сети!"
@@ -37,7 +36,7 @@ log_msg() {
     local level="$1"
     local message="$2"
     echo "[$level] $message"
-    logger -t "$LOG_TAG" "[$level] (v3.1.0-Control) $message"
+    logger -t "$LOG_TAG" "[$level] (v3.3.5-Control) $message"
 }
 
 # ==============================================================================
@@ -56,7 +55,7 @@ detect_unifi_parameters() {
     if [ -n "$unifi_route_line" ]; then
         local raw_table_cell
         raw_table_cell=$(echo "$unifi_route_line" | awk '{print $3}')
-        if [[ "$raw_table_cell" == *"."* ]]; then
+        if [[ "$raw_table_cell" == *.* ]]; then
             detected_table_id=$(echo "$raw_table_cell" | cut -d'.' -f1)
             detected_kernel_iface=$(echo "$raw_table_cell" | cut -d'.' -f2)
         fi
@@ -82,7 +81,13 @@ detect_unifi_parameters() {
         TARGET_WAN_TABLE="201" 
     fi
 
-    log_msg "INFO" "Параметры успешно согласованы: Дефолтный VPN туннель=$TARGET_WG_KERNEL (Таблица $TARGET_PURE_TABLE_ID), Исключения в WAN1=Таблица $TARGET_WAN_TABLE"
+    # 4. Динамическое определение локального IP-адреса UDM SE в мосту br0 для DNS Hijacking
+    ROUTER_LAN_IP=$(ip addr show br0 2>/dev/null | grep -oE 'inet [0-9.]+' | awk '{print $2}' | head -n 1 || true)
+    if [ -z "$ROUTER_LAN_IP" ]; then
+        ROUTER_LAN_IP="172.20.100.254" # Инженерный фолбэк
+    fi
+
+    log_msg "INFO" "Синхронизация: VPN=$TARGET_WG_KERNEL (Табл $TARGET_PURE_TABLE_ID), WAN1=Табл $TARGET_WAN_TABLE, DNS Перехватчик=$ROUTER_LAN_IP"
 }
 
 # --- Создание атомарных резервных копий состояния ядра перед изменениями ---
@@ -98,9 +103,8 @@ backup_kernel_state() {
     ls -t "${BACKUP_DIR}"/rules_*.bak 2>/dev/null | tail -n +$((MAX_BACKUPS + 1)) | xargs rm -f 2>/dev/null || true
     ls -t "${BACKUP_DIR}"/routes_main_*.bak 2>/dev/null | tail -n +$((MAX_BACKUPS + 1)) | xargs rm -f 2>/dev/null || true
 }
-
 # ==============================================================================
-# ПРОТОКОЛ ЗАПУСКА МАРШРУТИЗАЦИИ (START)
+# ПРОТОКОЛ ЗАПУСКА МАРШРУТИЗАЦИИ (START) - PART 2
 # ==============================================================================
 start_routing() {
     log_msg "INFO" "$MSG_STARTING"
@@ -108,13 +112,11 @@ start_routing() {
     backup_kernel_state
 
     # ЗАЩИТА 1: Изоляция локального трафика хоста самого UDM SE
-    # Все процессы самого роутера (DNS, curl, обновления) всегда идут по нативным таблицам
     if ! ip rule list | grep -F "from all iif lo pref 999 table main" >/dev/null 2>&1; then
         ip rule add from all iif lo pref 999 table main
     fi
 
     # ЗАЩИТА 2: Изоляция локальных LAN и VLAN подсетей (Local Traffic Isolation Bug)
-    # Предотвращает потерю связи VPN-клиентов с локальными сетевыми принтерами, шарами и панелью UDM
     for subnet in "${LOCAL_SUPERNETS[@]}"; do
         if ! ip rule list | grep -F "from all to $subnet pref $PREF_LOCAL_ISOLATION table main" >/dev/null 2>&1; then
             ip rule add to "$subnet" pref "$PREF_LOCAL_ISOLATION" table main
@@ -122,7 +124,6 @@ start_routing() {
     done
 
     # ПРАВИЛО 1: Перехват трафика выборочного Site-to-Site IPSec Datacenter (PBR_AND_DC)
-    # Пакеты в подсети ДЦ уходят в таблицу main, откуда их шифрует нативный XFRM IPSec
     for net_info in "${SRC_NETWORKS[@]}"; do
         IFS=':' read -r iface subnet type <<< "$net_info"
         
@@ -140,17 +141,13 @@ start_routing() {
     for net_info in "${SRC_NETWORKS[@]}"; do
         IFS=':' read -r iface subnet type <<< "$net_info"
         
-        # ЭТАП А: Перехват ресурсов-исключений.
-        # Если пакет от VPN-клиента совпал со списками ipset (ИМЕЕТ fwmark 0x99),
-        # мы принудительно отправляем его напрямую через провайдера в нативный WAN1 (TARGET_WAN_TABLE).
+        # ЭТАП А: Если пакет ИМЕЕТ маркер обхода (fwmark 0x99), отправляем его напрямую через WAN1
         if ! ip rule list | grep -F "from $subnet fwmark $FWMARK_ID pref $current_pref table $TARGET_WAN_TABLE" >/dev/null 2>&1; then
             ip rule add from "$subnet" fwmark "$FWMARK_ID" pref "$current_pref" table "$TARGET_WAN_TABLE"
         fi
         ((current_pref++))
 
-        # ЭТАП Б: Весь остальной трафик по умолчанию.
-        # Пакеты, у которых нет маркера исключений, пролетают верхнее правило 
-        # и безраздельно направляются в защищенный туннель WireGuard (TARGET_PURE_TABLE_ID).
+        # ЭТАП Б: Весь остальной трафик по умолчанию уходит в защищенный туннель WireGuard
         if ! ip rule list | grep -F "from $subnet pref $current_pref table $TARGET_PURE_TABLE_ID" >/dev/null 2>&1; then
             ip rule add from "$subnet" pref "$current_pref" table "$TARGET_PURE_TABLE_ID"
         fi
@@ -162,12 +159,37 @@ start_routing() {
         ip route add default dev "$TARGET_WG_KERNEL" table "$TARGET_PURE_TABLE_ID" || true
     fi
 
+    # --------------------------------------------------------------------------
+    # ПРАВИЛО 3: ПРИНУДИТЕЛЬНЫЙ ПЕРЕХВАТ DNS-ТРАФИКА (DNS HIJACKING & ANTI-DoH/DoT)
+    # --------------------------------------------------------------------------
+    log_msg "INFO" "Развертывание правил принудительного перехвата DNS на dnsmasq..."
+    for net_info in "${SRC_NETWORKS[@]}"; do
+        IFS=':' read -r iface subnet type <<< "$net_info"
+
+        # Заворачиваем стандартные запросы (порт 53) на локальный резолвер UDM
+        if ! iptables -t nat -C PREROUTING -s "$subnet" -p udp --dport 53 -j DNAT --to-destination "$ROUTER_LAN_IP:53" >/dev/null 2>&1; then
+            iptables -t nat -A PREROUTING -s "$subnet" -p udp --dport 53 -j DNAT --to-destination "$ROUTER_LAN_IP:53"
+        fi
+        if ! iptables -t nat -C PREROUTING -s "$subnet" -p tcp --dport 53 -j DNAT --to-destination "$ROUTER_LAN_IP:53" >/dev/null 2>&1; then
+            iptables -t nat -A PREROUTING -s "$subnet" -p tcp --dport 53 -j DNAT --to-destination "$ROUTER_LAN_IP:53"
+        fi
+
+        # Жестко блокируем попытки обойти dnsmasq через DoT (порт 853)
+        if ! iptables -C FORWARD -s "$subnet" -p tcp --dport 853 -j REJECT >/dev/null 2>&1; then
+            iptables -A FORWARD -s "$subnet" -p tcp --dport 853 -j REJECT
+        fi
+        if ! iptables -C FORWARD -s "$subnet" -p udp --dport 853 -j REJECT >/dev/null 2>&1; then
+            iptables -A FORWARD -s "$subnet" -p udp --dport 853 -j REJECT
+        fi
+    done
+    # --------------------------------------------------------------------------
+
     # Активация подсистемы динамических списков обхода блокировок (Bypass Loader)
     if [ -f "${TOOL_PATH}/vpn-bypass-loader.sh" ]; then
-        /bin/bash "${TOOL_PATH}/vpn-bypass-loader.sh" start || log_msg "WARNING" "Bypass подсистема завершилась со статусом alert."
+        /bin/bash "${TOOL_PATH}/vpn-bypass-loader.sh" start || log_msg "WARNING" "Bypass подсистема выдала предупреждение при старте."
     fi
 
-    log_msg "INFO" "Политики инверсной PBR маршрутизации успешно применены к ядру Linux."
+    log_msg "INFO" "Политики инверсной маршрутизации и защиты DNS успешно применены."
 }
 
 # ==============================================================================
@@ -176,25 +198,37 @@ start_routing() {
 clean_routing() {
     log_msg "INFO" "$MSG_CLEANING"
     
-    # 1. Сначала полностью гасим и демонтируем списки обхода ipset и iptables
+    # 1. Сначала полностью гасим и демонтируем списки обхода ipset, iptables и dnsmasq конфиги
     if [ -f "${TOOL_PATH}/vpn-bypass-loader.sh" ]; then
         /bin/bash "${TOOL_PATH}/vpn-bypass-loader.sh" stop || true
     fi
 
-    # 2. Удаление правила локальной петли хоста UDM
+    # 2. Демонтаж правил принудительного перехвата DNS и DoT
+    local clean_router_ip
+    clean_router_ip=$(ip addr show br0 2>/dev/null | grep -oE 'inet [0-9.]+' | awk '{print $2}' | head -n 1 || echo "172.20.100.254")
+    
+    for net_info in "${SRC_NETWORKS[@]}"; do
+        IFS=':' read -r iface subnet type <<< "$net_info"
+        while iptables -t nat -D PREROUTING -s "$subnet" -p udp --dport 53 -j DNAT --to-destination "$clean_router_ip:53" 2>/dev/null; do :; done
+        while iptables -t nat -D PREROUTING -s "$subnet" -p tcp --dport 53 -j DNAT --to-destination "$clean_router_ip:53" 2>/dev/null; do :; done
+        while iptables -D FORWARD -s "$subnet" -p tcp --dport 853 -j REJECT 2>/dev/null; do :; done
+        while iptables -D FORWARD -s "$subnet" -p udp --dport 853 -j REJECT 2>/dev/null; do :; done
+    done
+
+    # 3. Удаление правила локальной петли хоста UDM
     while ip rule del pref 999 table main 2>/dev/null; do :; done
 
-    # 3. Удаление правил локальной LAN/VLAN изоляции
+    # 4. Удаление правил локальной LAN/VLAN изоляции
     for subnet in "${LOCAL_SUPERNETS[@]}"; do
         while ip rule del to "$subnet" pref "$PREF_LOCAL_ISOLATION" table main 2>/dev/null; do :; done
     done
 
-    # 4. Удаление правил IPSec датацентра
+    # 5. Удаление правил IPSec датацентра
     for dc_subnet in "${DC_REMOTE_SUBNETS[@]}"; do
         while ip rule del to "$dc_subnet" pref "$PREF_IPSEC_INTERCEPT" table main 2>/dev/null; do :; done
     done
 
-    # 5. Каскадная тотальная зачистка динамического диапазона PBR правил (fwmark и table ID)
+    # 6. Каскадная тотальная зачистка динамического диапазона PBR правил (fwmark и table ID)
     local current_pref
     local max_pref_cleanup=$((PREF_VPN_PBR_BASE + (${#SRC_NETWORKS[@]} * 2) + 20))
     for ((current_pref=PREF_VPN_PBR_BASE; current_pref<max_pref_cleanup; current_pref++)); do
