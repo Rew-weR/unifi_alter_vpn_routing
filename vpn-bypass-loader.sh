@@ -153,4 +153,4 @@ case "$1" in
         echo "Usage: $0 {start|stop|clean|restart}"
         exit 1
         ;;
-case
+esac
