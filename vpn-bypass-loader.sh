@@ -64,32 +64,57 @@ load_bypass_logic() {
     export TARGET_PURE_TABLE_ID
     export TARGET_WG_KERNEL
 
+
     # --------------------------------------------------------------------------
-    # НАДЕЖНОЕ АВТООПРЕДЕЛЕНИЕ ФИЗИЧЕСКОГО ИНТЕРФЕЙСА WAN1 И СКАЧИВАНИЕ
+    # ИНТЕЛЛЕКТУАЛЬНЫЙ СУПЕР-ВЫБОР КАНАЛА ДЛЯ СКАЧИВАНИЯ СПИСКОВ
     # --------------------------------------------------------------------------
     if [ -n "$BYPASS_REMOTE_URL" ]; then
-        # Парсим скрытые таблицы UniFi OS, ориентируясь на метку DefaultGateway
+        # 1. Извлекаем домен/хост из URL для проверки пинга/доступности
+        local remote_host
+        remote_host=$(echo "$BYPASS_REMOTE_URL" | awk -F[/:] '{print $4}')
+        
+        # 2. Определяем имя физического WAN1
         local wan1_interface
         wan1_interface=$(ip route show table all | grep "proto DefaultGateway" | grep -oE "dev [a-zA-Z0-9.-]+" | awk '{print $2}' | head -n 1 || true)
+        [ -z "$wan1_interface" ] && wan1_interface="eth8"
 
-        # Жесткий фолбэк на eth8, если магия UniFi не вернула интерфейс
-        if [ -z "$wan1_interface" ]; then
-            wan1_interface="eth8"
+        # Очищаем имя интерфейса туннеля
+        local vpn_interface="${TARGET_WG_KERNEL:-wgclt4}"
+
+        log_msg "INFO" "Проверка доступности узла $remote_host..."
+        
+        # Переменная для финального выбора интерфейса скачивания
+        local selected_interface=""
+
+        # Тестируем обычный интернет провайдера (WAN1)
+        if curl --interface "$wan1_interface" -sI --max-time 3 "$BYPASS_REMOTE_URL" >/dev/null 2>&1; then
+            log_msg "INFO" "Узел доступен через обычный канал связи. Выбран WAN1 ($wan1_interface)."
+            selected_interface="$wan1_interface"
+        # Тестируем защищенный канал (VPN)
+        elif curl --interface "$vpn_interface" -sI --max-time 3 "$BYPASS_REMOTE_URL" >/dev/null 2>&1; then
+            log_msg "WARNING" "Узел заблокирован или недоступен через WAN1! Обнаружен доступ через туннель. Выбран VPN ($vpn_interface)."
+            selected_interface="$vpn_interface"
+        else
+            log_msg "ERROR" "Узел полностью недоступен через все каналы связи (WAN1 и VPN)."
         fi
 
-        log_msg "INFO" "Загрузка удаленного списка принудительно направлена через WAN1: $wan1_interface"
-        log_msg "INFO" "Адрес источника: $BYPASS_REMOTE_URL"
-
-        # Скачивание файла списков с ограничением времени cURL в 20 секунд
-        if curl --interface "$wan1_interface" -sSL "$BYPASS_REMOTE_URL" -o "$BYPASS_HOSTS_FILE" --max-time 20; then
-            log_msg "INFO" "Глобальный файл списков адресов успешно скачан и сохранен в $BYPASS_HOSTS_FILE"
+        # Выполняем скачивание через успешно протестированный интерфейс
+        if [ -n "$selected_interface" ]; then
+            log_msg "INFO" "Запуск скачивания списка через интерфейс: $selected_interface"
+            if curl --interface "$selected_interface" -sSL "$BYPASS_REMOTE_URL" -o "$BYPASS_HOSTS_FILE" --max-time 25; then
+                log_msg "INFO" "Глобальный файл списков адресов успешно обновлен."
+            else
+                log_msg "ERROR" "Сбой curl при скачивании файла через $selected_interface."
+            fi
         else
-            log_msg "WARNING" "Не удалось обновить файл списков по сети через $wan1_interface. Будет использована локальная копия (при наличии)."
+            log_msg "WARNING" "Скачивание невозможно. Будет использована старая локальная копия файла (при наличии)."
         fi
     else
         log_msg "WARNING" "Переменная BYPASS_REMOTE_URL не задана в vpn-routing.conf. Скачивание пропущено."
     fi
     # --------------------------------------------------------------------------
+
+
 
     # 1. Обработка кастомных сегментов в директории bypass-parts/
     if [ -d "$BYPASS_PARTS_DIR" ] && [ "$(ls -A "$BYPASS_PARTS_DIR" 2>/dev/null)" ]; then
