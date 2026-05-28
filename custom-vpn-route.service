@@ -1,14 +1,13 @@
 [Unit]
-Description=Custom VPN and DC Routing Configuration (v2.8.0-Stable)
-After=network-online.target
-Wants=network-online.target
+Description=Custom VPN and DC Routing Configuration (v2.8.9-Stable)
+After=network.target
 
 [Service]
 Type=idle
 RemainAfterExit=yes
-ExecStartPre=/data/vpn-router/vpn-routing-control.sh clean
-ExecStart=/data/vpn-router/vpn-routing-control.sh start
-ExecStop=/data/vpn-router/vpn-routing-control.sh stop
+ExecStartPre=/bin/bash /data/vpn-router/vpn-routing-control.sh clean
+ExecStart=/bin/bash /data/vpn-router/vpn-routing-control.sh start
+ExecStop=/bin/bash /data/vpn-router/vpn-routing-control.sh stop
 
 [Install]
 WantedBy=multi-user.target
