@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# CUSTOM VPN ROUTING SUITE FOR UNIFI OS (v3.0.0-Stable) - MAIN CONTROLLER
+# CUSTOM VPN ROUTING SUITE FOR UNIFI OS (v3.1.0-Stable) - MAIN CONTROLLER
 # ==============================================================================
-# Главный управляющий скрипт ядра Linux. Реализует селективное PBR-разделение
-# трафика для входящих VPN-клиентов с использованием логики инверсных маркеров.
+# Главный управляющий скрипт ядра Linux. Реализует инверсное PBR-разделение:
+# Все ресурсы по умолчанию идут в VPN, а списки исключений — в нативный WAN1.
 # ==============================================================================
 
 set -e
@@ -37,7 +37,7 @@ log_msg() {
     local level="$1"
     local message="$2"
     echo "[$level] $message"
-    logger -t "$LOG_TAG" "[$level] (v3.0.0-Control) $message"
+    logger -t "$LOG_TAG" "[$level] (v3.1.0-Control) $message"
 }
 
 # ==============================================================================
@@ -82,7 +82,7 @@ detect_unifi_parameters() {
         TARGET_WAN_TABLE="201" 
     fi
 
-    log_msg "INFO" "Параметры успешно согласованы: Выходной VPN Туннель=$TARGET_WG_KERNEL (Таблица $TARGET_PURE_TABLE_ID), Нативный Интернет WAN1=Таблица $TARGET_WAN_TABLE"
+    log_msg "INFO" "Параметры успешно согласованы: Дефолтный VPN туннель=$TARGET_WG_KERNEL (Таблица $TARGET_PURE_TABLE_ID), Исключения в WAN1=Таблица $TARGET_WAN_TABLE"
 }
 
 # --- Создание атомарных резервных копий состояния ядра перед изменениями ---
@@ -140,17 +140,17 @@ start_routing() {
     for net_info in "${SRC_NETWORKS[@]}"; do
         IFS=':' read -r iface subnet type <<< "$net_info"
         
-        # ЭТАП А: Перехват чистого, незаблокированного трафика клиента.
-        # Если пакет НЕ имеет маркера подсистемы обхода (not fwmark 0x99),
-        # мы принудительно выкидываем его в нативный интернет-шлюз провайдера (WAN1).
-        if ! ip rule list | grep -F "from $subnet not fwmark $FWMARK_ID pref $current_pref table $TARGET_WAN_TABLE" >/dev/null 2>&1; then
-            ip rule add from "$subnet" not fwmark "$FWMARK_ID" pref "$current_pref" table "$TARGET_WAN_TABLE"
+        # ЭТАП А: Перехват ресурсов-исключений.
+        # Если пакет от VPN-клиента совпал со списками ipset (ИМЕЕТ fwmark 0x99),
+        # мы принудительно отправляем его напрямую через провайдера в нативный WAN1 (TARGET_WAN_TABLE).
+        if ! ip rule list | grep -F "from $subnet fwmark $FWMARK_ID pref $current_pref table $TARGET_WAN_TABLE" >/dev/null 2>&1; then
+            ip rule add from "$subnet" fwmark "$FWMARK_ID" pref "$current_pref" table "$TARGET_WAN_TABLE"
         fi
         ((current_pref++))
 
-        # ЭТАП Б: Перехват оставшегося маркированного трафика.
-        # Трафик, который совпал со списками обхода блокировок ipset (имеет fwmark 0x99),
-        # пролетает верхнее правило и намертво заворачивается в туннель WireGuard клиента.
+        # ЭТАП Б: Весь остальной трафик по умолчанию.
+        # Пакеты, у которых нет маркера исключений, пролетают верхнее правило 
+        # и безраздельно направляются в защищенный туннель WireGuard (TARGET_PURE_TABLE_ID).
         if ! ip rule list | grep -F "from $subnet pref $current_pref table $TARGET_PURE_TABLE_ID" >/dev/null 2>&1; then
             ip rule add from "$subnet" pref "$current_pref" table "$TARGET_PURE_TABLE_ID"
         fi
@@ -167,7 +167,7 @@ start_routing() {
         /bin/bash "${TOOL_PATH}/vpn-bypass-loader.sh" start || log_msg "WARNING" "Bypass подсистема завершилась со статусом alert."
     fi
 
-    log_msg "INFO" "Политики селективной PBR маршрутизации успешно применены к ядру Linux."
+    log_msg "INFO" "Политики инверсной PBR маршрутизации успешно применены к ядру Linux."
 }
 
 # ==============================================================================
@@ -194,7 +194,7 @@ clean_routing() {
         while ip rule del to "$dc_subnet" pref "$PREF_IPSEC_INTERCEPT" table main 2>/dev/null; do :; done
     done
 
-    # 5. Каскадная тотальная зачистка динамического диапазона PBR правил (not fwmark и table ID)
+    # 5. Каскадная тотальная зачистка динамического диапазона PBR правил (fwmark и table ID)
     local current_pref
     local max_pref_cleanup=$((PREF_VPN_PBR_BASE + (${#SRC_NETWORKS[@]} * 2) + 20))
     for ((current_pref=PREF_VPN_PBR_BASE; current_pref<max_pref_cleanup; current_pref++)); do
