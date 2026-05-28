@@ -5,6 +5,7 @@
 # ==============================================================================
 
 mkdir -p /data/vpn-router /data/vpn-router/languages /data/vpn-router/routes-backup /data/vpn-router/bypass-parts
+chmod +x /data/vpn-router/*.sh
 
 set -e # Останавливать выполнение при любой критической ошибке
 
