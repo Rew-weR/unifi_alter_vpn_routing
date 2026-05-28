@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# CUSTOM VPN ROUTING SUITE FOR UNIFI OS (v2.9.0-Stable) - BYPASS LOADER
+# CUSTOM VPN ROUTING SUITE FOR UNIFI OS (v2.9.1-Stable) - BYPASS LOADER
 # ==============================================================================
 # Модуль автоматической загрузки и парсинга списков обхода блокировок.
 # Гарантирует скачивание файлов через нативный интерфейс WAN1.
@@ -24,7 +24,6 @@ LANG_FILE="${TOOL_PATH}/languages/${SYSTEM_LANGUAGE}.conf"
 if [ -f "$LANG_FILE" ]; then
     . "$LANG_FILE"
 else
-    # Фолбэк-строки, если языковой пакет недоступен
     MSG_STARTING_BYPASS="Инициализация списков обхода..."
     MSG_STOPPING_BYPASS="Очистка списков обхода..."
 fi
@@ -34,7 +33,7 @@ log_msg() {
     local level="$1"
     local message="$2"
     echo "[$level] $message"
-    logger -t "$LOG_TAG" "[$level] (v2.9.0-Loader) $message"
+    logger -t "$LOG_TAG" "[$level] (v2.9.1-Loader) $message"
 }
 
 # Скрипт-исполнитель логики обхода (Core Module)
@@ -66,31 +65,33 @@ load_bypass_logic() {
     export TARGET_WG_KERNEL
 
     # --------------------------------------------------------------------------
-    # НАДЕЖНОЕ АВТООПРЕДЕЛЕНИЕ ФИЗИЧЕСКОГО ИНТЕРФЕЙСА WAN1 ДЛЯ СКАЧИВАНИЯ
+    # НАДЕЖНОЕ АВТООПРЕДЕЛЕНИЕ ФИЗИЧЕСКОГО ИНТЕРФЕЙСА WAN1 И СКАЧИВАНИЕ
     # --------------------------------------------------------------------------
-    # Парсим скрытые таблицы UniFi OS, ориентируясь на метку DefaultGateway
-    local wan1_interface
-    wan1_interface=$(ip route show table all | grep "proto DefaultGateway" | grep -oE "dev [a-zA-Z0-9.-]+" | awk '{print $2}' | head -n 1 || true)
+    if [ -n "$BYPASS_REMOTE_URL" ]; then
+        # Парсим скрытые таблицы UniFi OS, ориентируясь на метку DefaultGateway
+        local wan1_interface
+        wan1_interface=$(ip route show table all | grep "proto DefaultGateway" | grep -oE "dev [a-zA-Z0-9.-]+" | awk '{print $2}' | head -n 1 || true)
 
-    # Жесткий фолбэк: если магия UniFi изменится, используем ваш точный интерфейс eth8
-    if [ -z "$wan1_interface" ]; then
-        wan1_interface="eth8"
-    fi
+        # Жесткий фолбэк на eth8, если магия UniFi не вернула интерфейс
+        if [ -z "$wan1_interface" ]; then
+            wan1_interface="eth8"
+        fi
 
-    # Ссылка на файл со списками адресов (подставьте вашу актуальную ссылку)
-    local remote_list_url="https://githubusercontent.com"
+        log_msg "INFO" "Загрузка удаленного списка принудительно направлена через WAN1: $wan1_interface"
+        log_msg "INFO" "Адрес источника: $BYPASS_REMOTE_URL"
 
-    log_msg "INFO" "Загрузка списков заблокированных адресов принудительно направлена через WAN1: $wan1_interface"
-
-    # Скачивание файла списков с жестким таймаутом cURL в 20 секунд (защита от зависания службы)
-    if curl --interface "$wan1_interface" -sSL "$remote_list_url" -o "$BYPASS_HOSTS_FILE" --max-time 20; then
-        log_msg "INFO" "Глобальный файл списков адресов успешно скачан и сохранен в $BYPASS_HOSTS_FILE"
+        # Скачивание файла списков с ограничением времени cURL в 20 секунд
+        if curl --interface "$wan1_interface" -sSL "$BYPASS_REMOTE_URL" -o "$BYPASS_HOSTS_FILE" --max-time 20; then
+            log_msg "INFO" "Глобальный файл списков адресов успешно скачан и сохранен в $BYPASS_HOSTS_FILE"
+        else
+            log_msg "WARNING" "Не удалось обновить файл списков по сети через $wan1_interface. Будет использована локальная копия (при наличии)."
+        fi
     else
-        log_msg "WARNING" "Не удалось обновить файл списков по сети через $wan1_interface. Используем локальную копию (если есть)."
+        log_msg "WARNING" "Переменная BYPASS_REMOTE_URL не задана в vpn-routing.conf. Скачивание пропущено."
     fi
     # --------------------------------------------------------------------------
 
-    # 1. Обработка атомарных сегментов в директории bypass-parts/
+    # 1. Обработка кастомных сегментов в директории bypass-parts/
     if [ -d "$BYPASS_PARTS_DIR" ] && [ "$(ls -A "$BYPASS_PARTS_DIR" 2>/dev/null)" ]; then
         log_msg "INFO" "Обнаружены кастомные сегменты в $BYPASS_PARTS_DIR. Запуск пакетной обработки..."
         
@@ -120,7 +121,6 @@ unload_bypass_logic() {
     log_msg "INFO" "${MSG_STOPPING_BYPASS:-Демонтаж и полная очистка правил обхода блокировок...}"
 
     if [ -f "$BYPASS_MODULE" ]; then
-        # Каскадно вычищаем правила для каждого сегмента
         if [ -d "$BYPASS_PARTS_DIR" ]; then
             for part_file in "$BYPASS_PARTS_DIR"/*; do
                 [ -e "$part_file" ] && /bin/bash "$BYPASS_MODULE" stop "$part_file" 2>/dev/null || true
@@ -131,7 +131,6 @@ unload_bypass_logic() {
             /bin/bash "$BYPASS_MODULE" stop "$BYPASS_HOSTS_FILE" 2>/dev/null || true
         fi
         
-        # Финальный запуск глобальной очистки зависших таблиц ipset
         /bin/bash "$BYPASS_MODULE" clean 2>/dev/null || true
     fi
 
@@ -154,4 +153,4 @@ case "$1" in
         echo "Usage: $0 {start|stop|clean|restart}"
         exit 1
         ;;
-esac
+case
