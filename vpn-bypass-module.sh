@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# CUSTOM VPN ROUTING SUITE FOR UNIFI OS (v3.3.0-Stable) - BYPASS CORE MODULE
+# CUSTOM VPN ROUTING SUITE FOR UNIFI OS (v3.4.0-Stable) - BYPASS CORE MODULE
 # ==============================================================================
 # Ядерный модуль обработки списков. Выполняет пакетную конвертацию IP/CIDR 
 # в ipset структуры ядра Linux и управляет правилами fwmark маршрутизации.
@@ -23,7 +23,7 @@ fi
 
 # Единый фреймворк логирования (syslog)
 log_msg() {
-    logger -t "$LOG_TAG" "[$1] (v3.3.0-BypassCore) $2"
+    logger -t "$LOG_TAG" "[$1] (v3.4.0-BypassCore) $2"
 }
 
 # Функция генерации валидного имени ipset из пути к файлу
@@ -61,7 +61,6 @@ start_bypass_file() {
     TARGET_WG_KERNEL="${detected_kernel_iface:-wgclt4}"
     TARGET_PURE_TABLE_ID="${detected_table_id:-178}"
     
-    # Если на входе не число, принудительно ставим эталонные 178
     if ! [[ "$TARGET_PURE_TABLE_ID" =~ ^[0-9]+$ ]]; then 
         TARGET_PURE_TABLE_ID="178" 
     fi
@@ -70,13 +69,12 @@ start_bypass_file() {
     set_name=$(get_set_name "$file_in")
     log_msg "INFO" "Инициализация списка: $set_name ($file_in). Таблица: $TARGET_PURE_TABLE_ID"
 
-    # 1. Создаем ipset типа hash:net (для поддержки одиночных IP и подсетей CIDR)
+    # 1. Создаем ipset типа hash:net
     if ! ipset list "$set_name" >/dev/null 2>&1; then
         ipset create "$set_name" hash:net hashsize 4096 maxelem 131072
     fi
 
     # 2. Высокоскоростная пакетная конвертация данных через AWK
-    log_msg "INFO" "Пакетная конвертация данных через AWK..."
     local tmp_restore="/tmp/${set_name}_restore.txt"
     echo "create $set_name hash:net hashsize 4096 maxelem 131072 -exist" > "$tmp_restore"
 
@@ -100,7 +98,6 @@ start_bypass_file() {
     fi
 
     # 4. Абсолютно безопасное атомарное добавление правила в ip rule
-    # Исключает ошибку "RTNETLINK answers: File exists" путем мягкой перезаписи правила
     ip rule del fwmark "$FWMARK_ID" pref "$PREF_BYPASS_RULE" table "$TARGET_PURE_TABLE_ID" 2>/dev/null || true
     ip rule add fwmark "$FWMARK_ID" pref "$PREF_BYPASS_RULE" table "$TARGET_PURE_TABLE_ID"
 
